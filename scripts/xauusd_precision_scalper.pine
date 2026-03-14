@@ -1,0 +1,110 @@
+// @version=5
+// ============================================================================
+// XAUUSD Precision Scalper | Webhook Ready
+// ============================================================================
+// Tuned for XAUUSD on a 5-minute chart.
+// Evaluates 5 filters per bar: EMA crossover, RSI sweet-spot, MACD momentum,
+// ADX trend strength, and strong-body candle confirmation.
+// Fires a BUY or SELL alert only when score >= 3/5.
+//
+// USAGE:
+//   1. Add as INDICATOR (not Strategy) on XAUUSD 5M chart
+//   2. Create 2 alerts (BUY + SELL) — see docs/gold_trading_bot_plan.md §8
+//   3. Set both alerts to "Once Per Bar Close" (prevents repainting)
+// ============================================================================
+indicator("XAUUSD Precision Scalper | Webhook Ready", overlay=true)
+
+// ---- Inputs ----
+emaFast   = input.int(9,    "EMA Fast")
+emaSlow   = input.int(21,   "EMA Slow")
+rsiLen    = input.int(14,   "RSI Length")
+adxLen    = input.int(14,   "ADX Length")
+adxMin    = input.float(18.0,"Min ADX", step=0.5)
+atrLen    = input.int(14,   "ATR Length")
+atrSL     = input.float(1.8,"SL Multiplier", step=0.1)
+atrTP     = input.float(2.5,"TP Multiplier",  step=0.1)
+maxPer10m = input.int(3,    "Max signals / 10 min")
+sessionOn = input.bool(false,"Session filter ON")
+
+// ---- Indicators ----
+emaF = ta.ema(close, emaFast)
+emaS = ta.ema(close, emaSlow)
+rsi  = ta.rsi(close, rsiLen)
+atr  = ta.atr(atrLen)
+
+// ---- ADX Calculation ----
+upMove   = high - high[1]
+downMove = low[1] - low
+plusDM   = upMove > downMove and upMove > 0 ? upMove : 0.0
+minusDM  = downMove > upMove and downMove > 0 ? downMove : 0.0
+tr_      = ta.rma(ta.tr, adxLen)
+plusDI   = 100 * ta.rma(plusDM, adxLen) / tr_
+minusDI  = 100 * ta.rma(minusDM, adxLen) / tr_
+dx       = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+adx      = ta.rma(dx, adxLen)
+
+// ---- MACD ----
+[_, _, hist] = ta.macd(close, 12, 26, 9)
+
+// ---- Candle Strength ----
+bodySize   = math.abs(close - open)
+rangeSize  = high - low
+strongBody = rangeSize > 0 ? bodySize / rangeSize > 0.5 : false
+bullCandle = close > open and strongBody
+bearCandle = close < open and strongBody
+
+// ---- Filter Scores ----
+emaBull  = emaF > emaS
+emaBear  = emaF < emaS
+rsiBull  = rsi >= 50 and rsi <= 68
+rsiBear  = rsi >= 32 and rsi <= 50
+macdBull = hist > 0 and hist > hist[1]
+macdBear = hist < 0 and hist < hist[1]
+trending = adx >= adxMin
+
+longScore  = (emaBull?1:0)+(rsiBull?1:0)+(macdBull?1:0)+(trending?1:0)+(bullCandle?1:0)
+shortScore = (emaBear?1:0)+(rsiBear?1:0)+(macdBear?1:0)+(trending?1:0)+(bearCandle?1:0)
+
+// ---- 10-Minute Signal Window ----
+var int   windowCount = 0
+var float windowOpen  = na
+if na(windowOpen) or (time - windowOpen) >= 600000
+    windowOpen  := time
+    windowCount := 0
+underLimit = windowCount < maxPer10m
+
+// ---- Session Filter (London/NY overlap) ----
+londonNY  = time(timeframe.period, "0800-1700", "Europe/London")
+inSession = sessionOn ? not na(londonNY) : true
+
+// ---- Signal Conditions ----
+longFire  = barstate.isconfirmed and longScore  >= 3 and underLimit and inSession
+shortFire = barstate.isconfirmed and shortScore >= 3 and underLimit and inSession
+
+if longFire
+    windowCount += 1
+if shortFire
+    windowCount += 1
+
+// ---- Visual Overlays ----
+plot(emaF, "EMA 9",  color=color.new(color.lime,10),   linewidth=1)
+plot(emaS, "EMA 21", color=color.new(color.orange,10), linewidth=1)
+plotshape(longFire,  location=location.belowbar, style=shape.triangleup,
+    color=color.new(color.green,0), size=size.normal)
+plotshape(shortFire, location=location.abovebar, style=shape.triangledown,
+    color=color.new(color.red,0),   size=size.normal)
+bgcolor(inSession ? color.new(color.blue,95) : na)
+
+// ---- Debug Label ----
+var label lbl = na
+label.delete(lbl)
+lbl := label.new(bar_index, low - atr*2,
+    "L:" + str.tostring(longScore) + "/5  S:" + str.tostring(shortScore) + "/5" +
+    "\nADX:" + str.tostring(math.round(adx,1)) + "  RSI:" + str.tostring(math.round(rsi,1)) +
+    "\nWindow: " + str.tostring(windowCount) + "/" + str.tostring(maxPer10m),
+    style=label.style_label_up, color=color.new(color.black,5),
+    textcolor=color.white, size=size.small)
+
+// ---- Alert Conditions ----
+alertcondition(longFire,  title="BUY Signal",  message="BUY XAUUSD fired")
+alertcondition(shortFire, title="SELL Signal", message="SELL XAUUSD fired")
